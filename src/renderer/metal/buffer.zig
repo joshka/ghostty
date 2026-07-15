@@ -90,6 +90,13 @@ pub fn Buffer(comptime T: type) type {
                         self.opts.resource_options,
                     },
                 );
+                // REPRO(ghostty-rs): `size` is already a byte count (req_bytes * 2),
+                // so `size * @sizeOf(T)` multiplies by element size a second time and
+                // over-allocates by a factor of @sizeOf(T). Logged so the real app
+                // shows the waste live as buffers grow on resize.
+                log.warn("REPRO Buffer({s}).sync grow: needed {d} B, allocated {d} B ({d}x over)", .{
+                    @typeName(T), req_bytes, size * @sizeOf(T), @sizeOf(T),
+                });
             }
 
             // We can fit within the buffer so we can just replace bytes.
@@ -147,6 +154,10 @@ pub fn Buffer(comptime T: type) type {
                         self.opts.resource_options,
                     },
                 );
+                // REPRO(ghostty-rs): same @sizeOf(T) double-multiply as sync().
+                log.warn("REPRO Buffer({s}).syncFromArrayLists grow: needed {d} B, allocated {d} B ({d}x over)", .{
+                    @typeName(T), req_bytes, size * @sizeOf(T), @sizeOf(T),
+                });
             }
 
             // We can fit within the buffer so we can just replace bytes.
@@ -182,4 +193,39 @@ pub fn Buffer(comptime T: type) type {
             return total_len;
         }
     };
+}
+
+test "REPRO ghostty-rs: sync grow allocates requested bytes, not @sizeOf(T)x more" {
+    // Exercises the real Buffer(T).sync() grow path against a live MTLDevice and
+    // reads the allocated byte length back. Skips on machines without a Metal
+    // device (e.g. headless CI).
+    const raw = mtl.MTLCreateSystemDefaultDevice() orelse return error.SkipZigTest;
+    const device = objc.Object.fromId(raw);
+
+    // A 32-byte element, the same @sizeOf as the real CellText wire struct.
+    const Elem = extern struct { a: u64, b: u64, c: u64, d: u64 };
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Elem));
+
+    // Start at 1 element, exactly like the renderer's per-frame cell buffers.
+    var buf = try Buffer(Elem).init(.{
+        .device = device,
+        .resource_options = .{ .storage_mode = .shared },
+    }, 1);
+    defer buf.deinit();
+
+    // Sync 4 elements (128 B > the 32 B initial buffer) to force a grow.
+    var data: [4]Elem = undefined;
+    try buf.sync(&data);
+
+    const req_bytes: c_ulong = 4 * @sizeOf(Elem); // 128
+    const want: c_ulong = req_bytes * 2; // 256 = "double what we require"
+    const got = buf.buffer.getProperty(c_ulong, "length");
+
+    std.debug.print(
+        "\n[REPRO] synced {d} B; buffer.length = {d} (want {d}); over-allocated {d}x\n",
+        .{ req_bytes, got, want, got / want },
+    );
+
+    // Fails today: got == 256 * @sizeOf(Elem) == 8192 (32x too large).
+    try std.testing.expectEqual(want, got);
 }

@@ -515,6 +515,14 @@ pub fn add(
             step.linkFramework("OpenGL");
         }
 
+        // REPRO(ghostty-rs): the Metal renderer's Zig code is normally linked by
+        // the Xcode project (which pulls in the Metal framework), so `zig build
+        // test` does not link Metal and can't exercise device-backed renderer
+        // code. Link it here so the buffer over-allocation repro test can run.
+        if (target.result.os.tag.isDarwin()) {
+            step.linkFramework("Metal");
+        }
+
         // Apple platforms do not include libc libintl so we bundle it.
         // This is LGPL but since our source code is open source we are
         // in compliance with the LGPL since end users can modify this
