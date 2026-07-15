@@ -220,3 +220,64 @@ test "REPRO ghostty-rs: sync grow allocates requested bytes, not @sizeOf(T)x mor
     // Fails today: got == 256 * @sizeOf(Elem) == 8192 (32x too large).
     try std.testing.expectEqual(want, got);
 }
+
+/// Process memory as macOS accounts it: phys_footprint is the metric Activity
+/// Monitor's "Memory" column and the jetsam/memory-pressure system use;
+/// resident_size is classic RSS. Both in bytes.
+fn procMemory() struct { phys_footprint: u64, resident: u64 } {
+    var info: std.c.task_vm_info_data_t = undefined;
+    var count = std.c.TASK_VM_INFO_COUNT;
+    const kr = std.c.task_info(
+        std.c.mach_task_self(),
+        std.c.TASK_VM_INFO,
+        @ptrCast(&info),
+        &count,
+    );
+    if (kr != 0) return .{ .phys_footprint = 0, .resident = 0 };
+    return .{ .phys_footprint = info.phys_footprint, .resident = info.resident_size };
+}
+
+test "REPRO ghostty-rs: real device RAM cost of the over-allocation" {
+    // Measures MTLDevice.currentAllocatedSize (total bytes the device has
+    // allocated; on Apple Silicon unified memory this is real system RAM)
+    // before and after growing a buffer sized like a large terminal grid.
+    const raw = mtl.MTLCreateSystemDefaultDevice() orelse return error.SkipZigTest;
+    const device = objc.Object.fromId(raw);
+
+    // 32-byte element, same @sizeOf as the real CellText wire struct.
+    const CellText = extern struct { a: u64, b: u64, c: u64, d: u64 };
+    const cells: usize = 100_000; // ~ a 500x200 grid (large display, small font)
+
+    const data = try std.testing.allocator.alloc(CellText, cells);
+    defer std.testing.allocator.free(data);
+
+    const metal_before = device.getProperty(c_ulong, "currentAllocatedSize");
+    const proc_before = procMemory();
+    var buf = try Buffer(CellText).init(.{
+        .device = device,
+        .resource_options = .{ .storage_mode = .shared },
+    }, 1);
+    try buf.sync(data); // grows the GPU buffer to fit `cells`
+    const metal_after = device.getProperty(c_ulong, "currentAllocatedSize");
+    const proc_after = procMemory();
+
+    const needed = cells * @sizeOf(CellText); // bytes of live data
+    const intended = needed * 2; // what sync() means to allocate (2x headroom)
+    const metal_delta = metal_after - metal_before;
+    const foot_delta = proc_after.phys_footprint -% proc_before.phys_footprint;
+    const rss_delta = proc_after.resident -% proc_before.resident;
+    std.debug.print(
+        "\n[REPRO RAM] {d} cells: live {d} MB, intended {d} MB\n" ++
+            "  Metal currentAllocatedSize +{d} MB ({d}x intended)\n" ++
+            "  process phys_footprint     +{d} MB\n" ++
+            "  process resident_size      +{d} MB\n",
+        .{
+            cells,           needed >> 20,      intended >> 20,
+            metal_delta >> 20, metal_delta / intended,
+            foot_delta >> 20,
+            rss_delta >> 20,
+        },
+    );
+
+    buf.deinit();
+}
