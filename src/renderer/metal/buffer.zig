@@ -81,22 +81,16 @@ pub fn Buffer(comptime T: type) type {
                 self.buffer.msgSend(void, objc.sel("release"), .{});
 
                 // Allocate a new buffer with enough to hold double what we require.
+                // `size` is already a byte count, so pass it directly.
                 const size = req_bytes * 2;
                 self.buffer = self.opts.device.msgSend(
                     objc.Object,
                     objc.sel("newBufferWithLength:options:"),
                     .{
-                        @as(c_ulong, @intCast(size * @sizeOf(T))),
+                        @as(c_ulong, @intCast(size)),
                         self.opts.resource_options,
                     },
                 );
-                // REPRO(ghostty-rs): `size` is already a byte count (req_bytes * 2),
-                // so `size * @sizeOf(T)` multiplies by element size a second time and
-                // over-allocates by a factor of @sizeOf(T). Logged so the real app
-                // shows the waste live as buffers grow on resize.
-                log.warn("REPRO Buffer({s}).sync grow: needed {d} B, allocated {d} B ({d}x over)", .{
-                    @typeName(T), req_bytes, size * @sizeOf(T), @sizeOf(T),
-                });
             }
 
             // We can fit within the buffer so we can just replace bytes.
@@ -145,19 +139,16 @@ pub fn Buffer(comptime T: type) type {
                 self.buffer.msgSend(void, objc.sel("release"), .{});
 
                 // Allocate a new buffer with enough to hold double what we require.
+                // `size` is already a byte count, so pass it directly.
                 const size = req_bytes * 2;
                 self.buffer = self.opts.device.msgSend(
                     objc.Object,
                     objc.sel("newBufferWithLength:options:"),
                     .{
-                        @as(c_ulong, @intCast(size * @sizeOf(T))),
+                        @as(c_ulong, @intCast(size)),
                         self.opts.resource_options,
                     },
                 );
-                // REPRO(ghostty-rs): same @sizeOf(T) double-multiply as sync().
-                log.warn("REPRO Buffer({s}).syncFromArrayLists grow: needed {d} B, allocated {d} B ({d}x over)", .{
-                    @typeName(T), req_bytes, size * @sizeOf(T), @sizeOf(T),
-                });
             }
 
             // We can fit within the buffer so we can just replace bytes.
