@@ -2929,6 +2929,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             var shaper_cells: ?[]const font.shape.Cell = null;
             var shaper_cells_i: usize = 0;
 
+            // Border-only cells render even when they have no glyph or when
+            // text is concealed. The foreground lists enforce global layering.
+            for (cells_raw[0..cells_len], 0..) |cell, x| {
+                if (cell.border_id == 0 or cell.border_id > state.border_sets.items.len) continue;
+                try self.addBorders(@intCast(x), @intCast(y), state.border_sets.items[cell.border_id - 1]);
+            }
+
             for (
                 0..,
                 cells_raw[0..cells_len],
@@ -3306,6 +3313,41 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .{ x, y, err },
                     );
                 };
+            }
+        }
+
+        fn addBorders(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            strokes: @import("../terminal/borders.zig").Set,
+        ) !void {
+            const borders = @import("../terminal/borders.zig");
+            for (strokes, 0..) |stroke, index| {
+                if (stroke.width == 0) continue;
+                var rect = borders.rectangle(index, stroke, self.grid_metrics.cell_width, self.grid_metrics.cell_height);
+                // Clip overflow at the viewport, keeping padding undecorated.
+                const cw: i32 = @intCast(self.grid_metrics.cell_width);
+                const ch: i32 = @intCast(self.grid_metrics.cell_height);
+                const left = @max(rect[0], -@as(i32, x) * cw);
+                const top = @max(rect[1], -@as(i32, y) * ch);
+                const right = @min(rect[0] + rect[2], (@as(i32, self.cells.size.columns) - x) * cw);
+                const bottom = @min(rect[1] + rect[3], (@as(i32, self.cells.size.rows) - y) * ch);
+                rect = .{ left, top, right - left, bottom - top };
+                if (rect[2] <= 0 or rect[3] <= 0) continue;
+                const cell: shaderpkg.CellText = .{
+                    .atlas = .solid,
+                    .grid_pos = .{ x, y },
+                    .color = .{ stroke.r, stroke.g, stroke.b, 255 },
+                    .glyph_size = .{ @intCast(rect[2]), @intCast(rect[3]) },
+                    .bearings = .{ @intCast(rect[0]), @intCast(ch - rect[1]) },
+                    .bools = .{ .no_min_contrast = true },
+                };
+                if (stroke.above) {
+                    try self.cells.add(self.alloc, .border_above, cell);
+                } else {
+                    try self.cells.add(self.alloc, .border_below, cell);
+                }
             }
         }
 

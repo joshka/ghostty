@@ -512,6 +512,7 @@ fragment float4 cell_bg_fragment(
 enum CellTextAtlas : uint8_t {
   ATLAS_GRAYSCALE = 0u,
   ATLAS_COLOR = 1u,
+  ATLAS_SOLID = 2u,
 };
 
 // We use a packed struct of bools for misc properties of the glyph.
@@ -664,7 +665,7 @@ vertex CellTextVertexOut cell_text_vertex(
 
   // If this cell is the cursor cell, but we're not processing
   // the cursor glyph itself, then we need to change the color.
-  if ((in.bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
+  if (in.atlas != ATLAS_SOLID && (in.bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
     out.color = load_color(
       uniforms.cursor_color,
       uniforms.use_display_p3,
@@ -688,6 +689,8 @@ fragment float4 cell_text_fragment(
   );
 
   switch (in.atlas) {
+    case ATLAS_SOLID:
+      return uniforms.use_linear_blending ? in.color : unlinearize(in.color);
     default:
     case ATLAS_GRAYSCALE: {
       // Our input color is always linear.

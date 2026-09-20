@@ -594,6 +594,11 @@ pub const Handler = struct {
 
     fn dcsCommand(self: *Handler, cmd: *dcs.Command) !void {
         switch (cmd.*) {
+            .borders => |request| {
+                if (request == .query) {
+                    self.writePty(@import("borders.zig").reply);
+                } else try self.terminal.cellBorders(request);
+            },
             .decrqss => |request| {
                 var response: [
                     dcs.Command.DECRQSS.max_response_bytes + 1
@@ -6759,4 +6764,82 @@ test "full reset drops kitty clipboard grants" {
     try testing.expectEqual(@as(usize, 1), S.read_count);
     try testing.expect(!S.last_read_granted);
     try s.handler.kitty_clipboard_grants.grant(testing.allocator, "pw", .read, false);
+}
+
+test "borders DCS paints halves on blank cells and clears on overwrite" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[2;3H\x1bP1+bghostty-border;set;3;16;80c5b7;0;1;1;2");
+    const pin = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 1 } }).?;
+    try testing.expectEqual(@as(u16, 0), pin.rowAndCell().cell.border_id);
+    s.nextSlice("\x1b\\");
+    var cell = pin.rowAndCell().cell;
+    try testing.expect(cell.border_id != 0);
+    try testing.expect(!cell.isEmpty());
+    try testing.expectEqual(@as(u16, 2), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(u16, 1), t.screens.active.cursor.y);
+    s.nextSlice("\x1bP1+bghostty-border;clear;1;1;1\x1b\\");
+    var strokes = t.border_store.get(cell.border_id);
+    try testing.expectEqual(@as(u6, 0), strokes[0].width);
+    try testing.expectEqual(@as(u6, 16), strokes[1].width);
+    const before = cell.border_id;
+    s.nextSlice("\x1bP1+bghostty-border;set;3;16;bad;0;1;1;1\x1b\\");
+    s.nextSlice("\x1bP2+bghostty-border;clear;4095;1;1\x1b\\");
+    try testing.expectEqual(before, cell.border_id);
+    s.nextSlice("\x1b[0m");
+    try testing.expectEqual(before, cell.border_id);
+    s.nextSlice(" ");
+    cell = pin.rowAndCell().cell;
+    try testing.expectEqual(@as(u16, 0), cell.border_id);
+    // The neighboring cell still has both halves.
+    const neighbor = t.screens.active.pages.pin(.{ .active = .{ .x = 3, .y = 1 } }).?;
+    strokes = t.border_store.get(neighbor.rowAndCell().cell.border_id);
+    try testing.expectEqual(@as(u6, 16), strokes[0].width);
+    try testing.expectEqual(@as(u6, 16), strokes[1].width);
+}
+
+test "borders follow scrolling and blank cells survive reflow" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[2;3H\x1bP1+bghostty-border;set;255;16;80c5b7;0;1;1;1\x1b\\");
+    s.nextSlice("\x1b[4;1H\n");
+    const moved = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(moved.rowAndCell().cell.border_id != 0);
+    try t.resize(testing.allocator, .{ .cols = 10, .rows = 4 });
+    const resized = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(resized.rowAndCell().cell.border_id != 0);
+    s.nextSlice("\x1b[?1049h");
+    const alternate = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expectEqual(@as(u16, 0), alternate.rowAndCell().cell.border_id);
+    s.nextSlice("\x1b[?1049l");
+    const restored = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(restored.rowAndCell().cell.border_id != 0);
+    s.nextSlice("\x1b[2J");
+    const erased = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expectEqual(@as(u16, 0), erased.rowAndCell().cell.border_id);
+}
+
+test "borders query reply and oversized payload recovery" {
+    const Response = struct {
+        var count: usize = 0;
+        fn write(_: *Handler, data: []const u8) void {
+            if (std.mem.eql(u8, data, @import("borders.zig").reply)) count += 1;
+        }
+    };
+    Response.count = 0;
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.handler.effects.write_pty = Response.write;
+    s.nextSlice("\x1bP1+bghostty-border;q\x1b\\");
+    try testing.expectEqual(@as(usize, 1), Response.count);
+    s.nextSlice("\x1bP1+b");
+    s.nextSlice("a" ** 257);
+    s.nextSlice("\x1b\\\x1bP1+bghostty-border;q\x1b\\");
+    try testing.expectEqual(@as(usize, 2), Response.count);
 }

@@ -20,6 +20,7 @@ const charsets = @import("charsets.zig");
 const csi = @import("csi.zig");
 const hyperlink = @import("hyperlink.zig");
 const glyph = @import("apc/glyph.zig");
+const borders = @import("borders.zig");
 const kitty = @import("kitty.zig");
 const osc = @import("osc.zig");
 const point = @import("point.zig");
@@ -90,6 +91,7 @@ mouse_shape: mouse.Shape = .text,
 
 /// Per-session Glyph Protocol registrations.
 glyph_glossary: glyph.Glossary = .empty,
+border_store: borders.Store = .{},
 
 /// Kitty drag and drop protocol (OSC 72) state. Allocated when a client
 /// registers to accept drops (t=a) and freed when it unregisters (t=A),
@@ -367,6 +369,7 @@ pub fn deinit(self: *Terminal, alloc: Allocator) void {
     self.pwd.deinit(alloc);
     self.title.deinit(alloc);
     self.glyph_glossary.deinit(alloc);
+    self.border_store.deinit(alloc);
     if (self.kitty_dnd) |dnd| dnd.destroy(alloc);
     self.* = undefined;
 }
@@ -16538,4 +16541,28 @@ test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
     t.eraseDisplay(.complete, false);
 
     try testing.expectEqual(t.screens.active.pages.rows, t.screens.active.pages.total_rows);
+}
+
+/// Paint cell decorations without moving the cursor or changing text rendition.
+pub fn cellBorders(self: *Terminal, request: borders.Request) !void {
+    if (request != .paint or self.status_display != .main) return;
+    const paint = request.paint;
+    const screen = self.screens.active;
+    const x0: usize = screen.cursor.x;
+    const y0: usize = screen.cursor.y;
+    const x1 = @min(@as(usize, self.cols), x0 + paint.cols);
+    const y1 = @min(@as(usize, self.rows), y0 + paint.rows);
+    for (y0..y1) |y| {
+        for (x0..x1) |x| {
+            const pin = screen.pages.pin(.{ .active = .{ .x = @intCast(x), .y = @intCast(y) } }).?;
+            const rac = pin.rowAndCell();
+            var value = self.border_store.get(rac.cell.border_id);
+            for (&value, 0..) |*stroke, i| {
+                if (paint.mask & (@as(u12, 1) << @intCast(i)) != 0) stroke.* = paint.stroke;
+            }
+            rac.cell.border_id = try self.border_store.intern(self.gpa(), value);
+            rac.row.dirty = true;
+            pin.node.page().dirty = true;
+        }
+    }
 }
